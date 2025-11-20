@@ -37,7 +37,7 @@ The training set contains  2571 observations and 33 variables, including the tar
 Let's get a better sense of the data by plotting their distributions. 
 ```{r}
 # Distribution of numerical variables
-plot_histogram(df)
+plot_histogram(raw)
 ```
 
 There is a mix of normal, skewed, and multimodal distributions across the production variables. Several predictors, such as `Carb.Pressure`, `Carb.Temp`, `Carb.Volume`, `Fill.Ounces`, `PC.Volume`, and `PSC`, exhibit a normal, unimodal distribution. In contrast, variables such as `Density`, `Carb.Rel`, `Carb.Flow`,` Filler.Speed`, `Balling` and `Balling.Lvl` show a clear bimodal or multimodal pattern. Some predictors, most notably `Oxygen.Filter`, `MFR`, `Hyd.Pressure1`, `Hyd.Pressure2`, and `Hyd.Pressure3` are heavily right skewed with many near zero values and a long tail of larger values. These distributions suggest the presence of potential outliers and cleaning may be required before modeling.
@@ -80,7 +80,8 @@ Most of the predictors have a small percentage of missing values (NA). the predi
 
 Let's start by removing the 4 rows where the rows where `PH` value is missing. We are removing them rather than imputing them because a model cannot be trained on data that has no target to learn from, doing so could introduce bias. Also, the 4 rows represent less than 1% of the total data and removing them should not have any significant impact on the model's performance.
 
-For the other missing values, they will be imputed with the median values since many of the variables were skewed or contained extreme values. Since many of the distribution plots were not symmetrical, imputing with the mean can be influenced by the outliers. Using the median ensures that the imputation does not distort the original distribution of the variables or bias the model 
+For the other missing values, they will be imputed with the median values since many of the variables were skewed or contained extreme values.Using the median ensures that the imputation does not distort the original distribution of the variables or bias the model
+
 ```{r}
 # Removing the rows where PH is missing
 df <- raw %>%
@@ -104,23 +105,69 @@ df_imputed <- df_imputed %>%
 
 ### Outliers
 
+Based on the distribution plots of the predictors, several variables appeared to contain potential outliers. These extreme values were visible in the histograms as long tails or wide ranges. To evaluate these observations, the interquartile range (IQR) rule will be applied to each numeric predictor to identify how many outliers each variable contains. 
 
+```{r}
+# Select only numeric columns
+numeric_vars <- df_imputed %>%
+  select(where(is.numeric))
 
+# Flag outliers using the IQR rule
+flag_outliers <- function(x) {
+  Q1  <- quantile(x, 0.25, na.rm = TRUE)
+  Q3  <- quantile(x, 0.75, na.rm = TRUE)
+  IQR_val <- IQR(x, na.rm = TRUE)
+  lower <- Q1 - 1.5 * IQR_val
+  upper <- Q3 + 1.5 * IQR_val
+  (x < lower) | (x > upper)
+}
 
+# Apply the function across all numeric columns
+outlier_flags <- numeric_vars %>%
+  mutate(across(everything(), flag_outliers, .names = "outlier_{col}"))
 
+# Count number of outliers per variable and outlier percentage
+outlier_summary <- map_dfr(names(numeric_vars), function(var) {
+  x <- numeric_vars[[var]]
+  flags <- flag_outliers(x)
+  outlier_count <- sum(flags, na.rm = TRUE)
+  outlier_pct <- (outlier_count / sum(!is.na(x))) * 100
+  tibble(
+    variable      = var,
+    outlier_count = outlier_count,
+    outlier_pct   = outlier_pct
+  )
+}) %>%
+  arrange(desc(outlier_count))
 
+outlier_summary
+```
 
+The IQR analysis confirms that some predictors contain a large number of extreme values. Variables such as `Filler.Speed`, `MFR`, `Air.Pressurer`, and `Oxygen.Filler` have the highest outlier counts, ranging from 7% to 17% of their total observations. This is consistent with the distribution plots, where each of these variables was heavily  skewed. At this stage in the EDA, these outliers will not be removed. For now, we can just acknowledge that there are extreme values in the that may require transformation during modeling.
 
+### Correlation plot
 
+To identify the relationship between the numeric variables, we can create a correlation matrix.
 
+```{r fig.align="center", echo = FALSE,fig.width = 16}
 
+# Correlation matrix
+corr_mat <- cor(numeric_vars, use = "pairwise.complete.obs")
 
+corrplot(
+  corr_mat,
+  method = "color",
+  type = "lower",
+  tl.cex = 0.6,
+  number.cex = 0.5,
+  order = "hclust",
+  addCoef.col = "black"
+)
+```
 
+This correlation heatmap shows that most predictors have a weak to moderate linear relationship with the target variable, `pH`. The strongest predictor for `pH` is `MnF Flow` with a correlation coefficient of -0.45, indicating that as manufacturing flow rate increases, the `pH` tends to decrease. Bowl Setpoint has the highest positive correlation with pH with a correlation coefficient of 0.35. 
 
-
-
-
-
+The heatmap also reveals significant multicollinearity. As shown by the dark clusters in the heatmap, predictors like `Balling` and `Balling Lvl`, `Density` and `Alch Rel`, and the `Hyd Pressure` variables have a correlation close to 1.0. This redundancy may be problematic for linear regression models as it makes it difficult to see the individual effects of these predictors. However, since there is an absence of a strong linear correlation (r >0.8) with the target variable, this suggests that the relationship between the production factors and pH is complex and likely non-linear. 
 
 
 
