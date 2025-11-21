@@ -21,9 +21,10 @@ library(readxl)
 library(corrplot)
 library(DataExplorer)
 library(caret)
+library(writexl)
 ```
 
-### Loading the training data
+## Loading the training data
 ```{r}
 raw <- read_excel("Training Data.xlsx")
 
@@ -33,7 +34,7 @@ glimpse(raw)
 
 The training set contains  2571 observations and 33 variables, including the target variable `PH`. Other than the `Brand Code` variable, which is a chr type, the rest of the production factors are stored as numeric types. 
 
-### Distribution of variables
+## Distribution of variables
 Let's get a better sense of the data by plotting their distributions. 
 ```{r}
 # Distribution of numerical variables
@@ -66,7 +67,7 @@ ggplot(raw, aes(x = `Brand Code`, y = PH)) +
 
 This boxplots show that all brands have similar PH distributions centered around 8.5. 
 
-### Missing Values
+## Missing Values
 
 Let's check for missing values in the training data set.
 
@@ -103,7 +104,7 @@ df_imputed <- df_imputed %>%
   mutate(`Brand Code` = ifelse(is.na(`Brand Code`), "Unknown", `Brand Code`))
 ```
 
-### Outliers
+## Outliers
 
 Based on the distribution plots of the predictors, several variables appeared to contain potential outliers. These extreme values were visible in the histograms as long tails or wide ranges. To evaluate these observations, the interquartile range (IQR) rule will be applied to each numeric predictor to identify how many outliers each variable contains. 
 
@@ -145,7 +146,7 @@ outlier_summary
 
 The IQR analysis confirms that some predictors contain a large number of extreme values. Variables such as `Filler.Speed`, `MFR`, `Air.Pressurer`, and `Oxygen.Filler` have the highest outlier counts, ranging from 7% to 17% of their total observations. This is consistent with the distribution plots, where each of these variables was heavily  skewed. At this stage in the EDA, these outliers will not be removed. For now, we can just acknowledge that there are extreme values in the that may require transformation during modeling.
 
-### Correlation plot
+## Correlation plot
 
 To identify the relationship between the numeric variables, we can create a correlation matrix.
 
@@ -169,32 +170,217 @@ This correlation heatmap shows that most predictors have a weak to moderate line
 
 The heatmap also reveals significant multicollinearity. As shown by the dark clusters in the heatmap, predictors like `Balling` and `Balling Lvl`, `Density` and `Alch Rel`, and the `Hyd Pressure` variables have a correlation close to 1.0. This redundancy may be problematic for linear regression models as it makes it difficult to see the individual effects of these predictors. However, since there is an absence of a strong linear correlation (r >0.8) with the target variable, this suggests that the relationship between the production factors and pH is complex and likely non-linear. 
 
+# Machine Learning Prediction Experiments and Validation
 
+The following code cells will conduct experiments using several machine learning algorithms using grid search, to predict pH. Additionally, the winner model, based on lowest RMSE, will be validated using the test set, to assess generalization.
 
+## Data Preparation for Modeling
 
+Before running our algorithms, we need to prepare the data to ensure fair comparisons.
 
+1. Encoding Categorical Variables: Machine learning models (like SVM and XGBoost) require numerical input. We will convert Brand Code into dummy variables (one-hot encoding).
 
+2. Train/Test Split: We will split the provided historical data into a Training Set (80%) to build the models and a Test Set (20%) to act as an unseen validation set. This allows us to simulate how the model performs on new data.
 
+3. Preprocessing: We will center and scale the numeric variables, which is essential for models like SVM to function correctly. Unlike XGBoost (multiple decision trees stacked on top of each other), SVM is based on distance metrics. Thus, differing scales between features can inadvertently put more weight on certain features than others (even for XGBoost, etc. it is generally good practice to scale and center).
 
+```{r}
+set.seed(958) #Ensure reproducibility (958 = 9.58 seconds -> Usain Bolt's 100m world record. Lucky Number 😉)
 
+#One-Hot Encoding for Brand Code
+#We use model.matrix to expand factors to dummy variables
+model_matrix = model.matrix(PH ~ . - 1, data = df_imputed) %>%
+  as.data.frame()
 
+#Bind the target variable PH back to the dataset
+data_ready = cbind(PH = df_imputed$PH, model_matrix)
 
+#Splitting the data (80% Train, 20% Test)
+train_index = createDataPartition(data_ready$PH, p = 0.80, list = FALSE)
+train_data = data_ready[train_index, ]
+test_data  = data_ready[-train_index, ]
 
+cat("Training Set Dimensions:", dim(train_data), "\n")
+cat("Test Set Dimensions:", dim(test_data))
+```
 
+## Model Experiments
 
+We will utilize caret to perform a grid search with Cross-Validation (5-fold). This technique splits the training data into 5 chunks, training on 4 and validating on the 5th, rotating through all chunks. This prevents us from selecting a model that just happens to memorize the training data (overfitting).
 
+We are testing three distinct approaches:
 
+1. Multiple Linear Regression (Baseline): Assumes a linear relationship.
 
+2. Support Vector Machine (Radial Basis Function): Good for complex, non-linear boundaries.
 
+3. XGBoost (Gradient Boosting): An ensemble tree method that is currently the industry standard for high-performance tabular prediction.
 
+```{r}
+#Set up Cross-Validation control
+fit_control = trainControl(
+  method = "cv",
+  number = 5,
+  savePredictions = "final",
+  verboseIter = FALSE
+)
 
+#--- Model 1: Multiple Linear Regression (Baseline) ---
+set.seed(958)
+lm_model = train(
+  PH ~ .,
+  data = train_data,
+  method = "lm",
+  trControl = fit_control,
+  preProcess = c("center", "scale")
+)
 
+#--- Model 2: Support Vector Machine (SVM) ---
+#Grid Search for Cost (C) and Sigma
+svm_grid = expand.grid(
+  sigma = c(0.01, 0.05, 0.1),
+  C = c(0.1, 1, 10)
+)
 
+set.seed(958)
+svm_model = train(
+  PH ~ .,
+  data = train_data,
+  method = "svmRadial",
+  trControl = fit_control,
+  tuneGrid = svm_grid,
+  preProcess = c("center", "scale")
+)
 
+#--- Model 3: XGBoost (Gradient Boosting) ---
+#Grid Search for Tree Depth, Learning Rate (eta), and Iterations
+xgb_grid = expand.grid(
+  nrounds = c(100, 200),
+  max_depth = c(3, 6),
+  eta = c(0.05, 0.1, 0.3),
+  gamma = 0,
+  colsample_bytree = 0.8,
+  min_child_weight = 1,
+  subsample = 0.8
+)
 
+set.seed(958)
+xgb_model = train(
+  PH ~ .,
+  data = train_data,
+  method = "xgbTree",
+  trControl = fit_control,
+  tuneGrid = xgb_grid,
+  preProcess = c("center", "scale"),
+  verbosity = 0
+)
+```
 
+## Model Selection
 
+We evaluate the models based on *RMSE* (Root Mean Squared Error). RMSE measures the average magnitude of the error; lower values indicate better fit. We also look at *MAE* (Mean Absolute Error), due to its interpretability especially for non-technical business stakeholders, and *R-Squared*.
 
+```{r}
+#Collect results
+results = resamples(list(
+  Linear_Reg = lm_model,
+  SVM = svm_model,
+  XGBoost = xgb_model
+))
 
+#Summarize the results
+summary(results)
+
+#Visualize the comparison
+bwplot(results, metric = "RMSE", main = "Model Comparison: RMSE (Lower is Better)")
+
+#Extract best RMSE values to a table
+model_comparison = data.frame(
+  Model = c("Linear Regression", "SVM", "XGBoost"),
+  RMSE = c(min(lm_model$results$RMSE), min(svm_model$results$RMSE), min(xgb_model$results$RMSE)),
+  Rsquared = c(max(lm_model$results$Rsquared), max(svm_model$results$Rsquared), max(xgb_model$results$Rsquared))
+) %>%
+  arrange(RMSE)
+
+knitr::kable(model_comparison, caption = "Final Model Performance Comparison")
+```
+
+Selection Decision: Based on the empirical evidence from our cross-validation, the XGBoost model yielded the lowest RMSE. The Linear Regression baseline performed significantly worse, confirming our hypothesis from the EDA that the relationships between manufacturing factors and pH are non-linear and complex. We will proceed with the winner (lowest RMSE) for final validation.
+
+## Final Validation on Test Set
+
+Now that we have selected our "Winner" model, we must validate it against the 20% holdout Test Set that the model has never seen. This gives us a realistic expectation of performance in the actual production environment.
+
+```{r}
+#Determine the winner automatically
+best_model_name = model_comparison$Model[1]
+cat("The selected winner model is:", best_model_name, "\n")
+
+#Define the model object based on the winner
+final_model = xgb_model
+
+# Make predictions on the Test Set
+predictions = predict(final_model, newdata = test_data)
+
+# Calculate Final Metrics
+postResample(pred = predictions, obs = test_data$PH)
+```
+
+## Visualization of Predictions
+
+To visually assess the quality of our predictions, we will plot the Actual vs. Predicted pH and the Distribution of Residuals (Errors). Ideally, the residuals should be normally distributed around zero.
+
+```{r}
+#Create a dataframe for plotting
+val_results = data.frame(
+  Actual = test_data$PH,
+  Predicted = predictions
+) %>%
+  mutate(Residuals = Actual - Predicted)
+
+#Plot 1: Actual vs Predicted
+p1 = ggplot(val_results, aes(x = Actual, y = Predicted)) +
+  geom_point(color = "blue", alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  theme_minimal() +
+  labs(
+    title = paste("Actual vs. Predicted pH (", best_model_name, ")"),
+    subtitle = "Red dashed line represents perfect prediction",
+    x = "Actual pH",
+    y = "Predicted pH"
+  )
+
+#Plot 2: Residuals Histogram
+p2 = ggplot(val_results, aes(x = Residuals)) +
+  geom_histogram(bins = 30, fill = "darkgreen", color = "white", alpha = 0.7) +
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed") +
+  theme_minimal() +
+  labs(
+    title = "Distribution of Residuals",
+    subtitle = "Ideally centered at 0",
+    x = "Residual Error (Actual - Predicted)",
+    y = "Count"
+  )
+
+#Display plots
+print(p1)
+print(p2)
+```
+
+*Interpretation:* The Actual vs. Predicted plot shows how closely our model tracks the true pH values (besides one outlier). The tighter the points are to the red dashed line, the better the accuracy. The residuals histogram shows us the "error distribution." The bell curve centered at zero indicates a healthy model that is not systematically over-predicting or under-predicting.
+
+Finally, we will export the predictions to an Excel-readable format. Below, we will find additional analysis for the predictions. Specifically, we will look at feature importance from the XGBoost output, as well as using *SHAP* (SHapley Additive exPlanations) to evaluate the impact of specific features on each predicition, allowing us to identify trends and, most importantly, actionable insights for the beverage process.
+
+```{r}
+#Add ID column if needed, here we just export the comparison
+output_df = val_results %>%
+  select(Actual_PH = Actual, Predicted_PH = Predicted, Error = Residuals)
+
+write_xlsx(output_df, "PH_Model_Predictions.xlsx")
+
+cat("Predictions have been exported to 'PH_Model_Predictions.xlsx'.")
+```
+
+## Feature Importance and SHAP Values
 
 
